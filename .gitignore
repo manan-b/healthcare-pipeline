@@ -1,0 +1,6 @@
+# Ignored files explicitly removed from GitHub tracking
+Dashboard/images/
+images/
+bronze_transformations/
+silver_transformations/
+gold_transformations/
