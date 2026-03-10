@@ -1,6 +1,0 @@
-patient_id,age,gender,height_cm,weight_kg,bmi,systolic_bp,diastolic_bp
-1001,45,Male,175,80,26.1,120,78
-1002,62,Female,160,72,28.1,145,95
-1003,38,Male,180,90,27.8,118,75
-1004,55,Female,165,68,25.0,160,100
-1005,70,Male,170,85,29.4,175,110
