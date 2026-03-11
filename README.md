@@ -1,9 +1,9 @@
 # 🏥 Healthcare Patient Analytics Pipeline
 
-## 📖 Project Overview
+## Project Overview
 This project is an end-to-end Healthcare Patient Analytics Pipeline built using Databricks, PySpark, Delta Lake, AWS S3, and Python. The pipeline ingests raw patient clinical and demographic records, applies complex data transformations and quality checks, and produces business-ready analytics tables. It implements a robust **Medallion Architecture (Bronze ➔ Silver ➔ Gold)** to ensure data quality, traceability, and scalable performance, enabling healthcare providers to analyze patient risks, hospital performance, and diagnosis trends.
 
-## 🏗️ Architecture Overview (Medallion Architecture)
+## Architecture Overview (Medallion Architecture)
 The data pipeline follows the best practices of the Databricks Medallion Architecture:
 - **🥉 Bronze Layer (Raw):** Raw data is ingested from an AWS Glue Data Catalog and stored in an immutable, append-only Delta table. Metadata columns (ingestion timestamp, source file, batch ID) are appended to guarantee full lineage and traceability.
 - **🥈 Silver Layer (Cleaned & Conformed):** Data is read incrementally, cleaned, and validated. Transformations include gender and smoking status standardization, categorical null-filling, clinical range validation (e.g., valid blood pressure or BMI ranges), and patient-level deduplication using `MERGE` (Upsert) operations.
