@@ -1,127 +1,72 @@
-# Healthcare Patient Analytics Pipeline
+# 🏥 Healthcare Patient Analytics Pipeline
 
-A production-grade batch data pipeline built for healthcare analytics using **AWS Glue**, **Amazon S3**, **Databricks**, **PySpark**, and **Delta Lake**, following the **Medallion Architecture** (Bronze → Silver → Gold).
+## 📖 Project Overview
+This project is an end-to-end Healthcare Patient Analytics Pipeline built using Databricks, PySpark, Delta Lake, AWS S3, and Python. The pipeline ingests raw patient clinical and demographic records, applies complex data transformations and quality checks, and produces business-ready analytics tables. It implements a robust **Medallion Architecture (Bronze ➔ Silver ➔ Gold)** to ensure data quality, traceability, and scalable performance, enabling healthcare providers to analyze patient risks, hospital performance, and diagnosis trends.
 
----
+## 🏗️ Architecture Overview (Medallion Architecture)
+The data pipeline follows the best practices of the Databricks Medallion Architecture:
+- **🥉 Bronze Layer (Raw):** Raw data is ingested from an AWS Glue Data Catalog and stored in an immutable, append-only Delta table. Metadata columns (ingestion timestamp, source file, batch ID) are appended to guarantee full lineage and traceability.
+- **🥈 Silver Layer (Cleaned & Conformed):** Data is read incrementally, cleaned, and validated. Transformations include gender and smoking status standardization, categorical null-filling, clinical range validation (e.g., valid blood pressure or BMI ranges), and patient-level deduplication using `MERGE` (Upsert) operations.
+- **🥇 Gold Layer (Curated Business-Level Tables):** Aggregated metrics and KPIs are computed into specialized Delta tables for BI dashboards and downstream analytics. These include patient risk scores, hospital-level statistics, diagnosis prevalence, and a daily KPI summary.
 
-## Architecture Overview
+## 📂 Data Source Description
+The pipeline processes continuous healthcare streams and batch records encompassing patient demographics, vitals, lab results, and hospital information. The primary data source ingested is `patient_records.csv`, which contains over 56,000+ patient records (approx. 8.3 MB of raw healthcare data) structured with cardiovascular risk factors, lifestyle choices, and clinical diagnoses.
 
-```
-patient_records.csv
-        |
-        v
-  [AWS S3 - raw/]
-        |
-        v
-  [AWS Glue Crawler]
-  [Glue Data Catalog]
-        |
-        v
-  [Databricks - Bronze Delta Table]   ← Glue-cataloged raw data ingestion
-        |
-        v
-  [Databricks - Silver Delta Table]   ← Cleaned, validated, deduplicated
-        |
-        v
-  [Databricks - Gold Delta Tables]    ← Aggregated KPIs and analytics
-        |
-        v
-  [Databricks Workflows - Daily Run]  ← Scheduled orchestration (2 AM UTC)
-```
+## 📊 Dataset Fields / Schema Overview
+The primary dataset includes 32 critical features. Key fields include:
+- **Demographics & ID:** `patient_id`, `age`, `gender`, `hospital_id`, `doctor_id`
+- **Vitals & Measurements:** `height_cm`, `weight_kg`, `bmi`, `systolic_bp`, `diastolic_bp`, `heart_rate`, `max_heart_rate`
+- **Lab Results:** `cholesterol_total`, `hdl_cholesterol`, `ldl_cholesterol`, `triglycerides`, `fasting_glucose`, `hba1c`
+- **Lifestyle Factors:** `smoking_status`, `alcohol_consumption`, `physical_activity_level`
+- **Clinical History & Diagnosis:** `family_history_heart`, `diabetes`, `hypertension`, `chest_pain_type`, `resting_ecg`, `exercise_induced_angina`, `diagnosis_code`, `diagnosis_description`, `heart_disease`
 
----
+## ⚙️ Pipeline Workflow
+1. **Source Storage:** Raw CSV files are uploaded to an AWS S3 bucket.
+2. **Cataloging:** AWS Glue Crawlers automatically infer the schema from S3 and register it in the Glue Data Catalog.
+3. **Bronze Ingestion:** A Databricks Spark job reads the Glue-cataloged table, appends audit metadata, performs initial type casting, and appends the data partitioned by `_ingestion_date` into the Bronze Delta table.
+4. **Silver Transformation:** An incremental PySpark job reads only the newly ingested Bronze data, applies data quality rules, and performs an Upsert (`MERGE INTO`) into the Silver Delta table, partitioned by `diagnosis_code`.
+5. **Gold Analytics:** Cleaned Silver data is aggregated into four distinct Gold Delta tables, ready to be served to reporting layers.
+6. **Logging:** A custom logging framework writes execution metadata to a distinct `pipeline_log` table.
 
-## Tech Stack
+## 🥉 Bronze Layer Description
+The Bronze layer serves as the historical archive of all ingested data with no data truncation.
+- **Operations:** Spark connects to the AWS Glue metastore to read predefined schemas. Audit metadata (`_ingestion_timestamp`, `_source_file`, `_batch_id`, `_ingestion_date`) is injected.
+- **Storage:** Stored in S3 using Delta format, enabling ACID transactions on the data lake.
 
-| Layer | Technology |
-|-------|-----------|
-| Storage | Amazon S3 |
-| Cataloging | AWS Glue Crawler + Data Catalog |
-| Processing | Databricks (Apache Spark 3.5.0) |
-| Table Format | Delta Lake |
-| Language | PySpark (Python 3.x) |
-| Orchestration | Databricks Workflows (Cron) |
-| Version Control | GitHub |
+## 🥈 Silver Layer Transformations and Responsibilities
+The Silver layer is responsible for enforcing schema validation and data hygiene.
+- **Handling Nulls:** Drops rows with missing `patient_id` and fills categorical nulls with `'Unknown'`.
+- **Standardization:** Normalizes values for `gender` (M/F ➔ Male/Female) and `smoking_status`.
+- **Range Validation:** Ensures clinical realism (e.g., drops Age > 120, sets outlier BP or BMI measures to Null).
+- **Deduplication:** Drops exact duplicates and utilizes Spark `MERGE` to prevent duplicate patient records across daily batch runs.
 
----
+## 🥇 Gold Layer Analytics
+Contains four highly-optimized analytics tables:
+1. **Patient Risk Scores:** Calculates a unified risk score (0-100) based on clinical factors (Age, BP, Diabetes, BMI, etc.) and categorizes patients into High, Medium, or Low risk.
+2. **Hospital Statistics:** Aggregates total patients, doctors, average vitals, and morbidity percentages (e.g., heart disease rate) partitioned by `hospital_id`.
+3. **Diagnosis Analytics:** Summarizes patient counts and average clinical metrics grouped by respective `diagnosis_code`.
+4. **Daily KPI Summary:** Maintains a historical record of system-wide processing metrics and clinical averages per reporting date.
 
-## Project Structure
+## 🔄 Key Data Transformations
+- **Feature Engineering:** Synthetic calculated column `risk_score` utilizing conditional weights.
+- **Incremental Reads:** PySpark dynamically fetches data matching `MAX(_ingestion_date)` from Bronze.
+- **Upserts:** Used Delta Lake's `whenMatchedUpdateAll()` and `whenNotMatchedInsertAll()`.
+- **Data Quality Framework:** Custom PySpark functions to measure null rates, duplicate thresholds, and out-of-range clinical values prior to Silver commit.
 
-```
-healthcare-pipeline/
-├── notebooks/
-│   ├── 00_setup_and_config.py
-│   ├── 01_bronze_ingestion.py
-│   ├── 02_silver_transformation.py
-│   └── 03_gold_analytics.py
-├── scripts/
-│   └── upload_to_s3.py
-├── config/
-│   └── pipeline_config.py
-├── data/
-│   └── sample/
-│       └── patient_records_sample.csv
-├── docs/
-│   └── Healthcare_Patient_Analytics_Pipeline_Guide.txt
-├── .gitignore
-├── LICENSE
-└── README.md
-```
+## 🛠️ Technologies Used
+- **Compute & Orchestration:** Databricks, PySpark, Databricks Workflows
+- **Storage & Formats:** AWS S3, Delta Lake, Parquet
+- **Data Cataloging:** AWS Glue (Crawlers & Data Catalog)
+- **IAM & Security:** AWS IAM (Custom Roles and Policies)
+- **Languages:** Python (PySpark API), Spark SQL
 
----
+## 🛡️ Data Quality and Error Handling
+- **Automated Validation:** A discrete Data Quality framework validates threshold constraints (e.g., max 5% null rate on Systolic BP) and halts the pipeline if critical thresholds are breached.
+- **Event Logging:** Centralized `pipeline_log` Delta table captures pipeline duration, row counts, and explicit error messages with UUID trace IDs.
+- **Try/Catch Implementation:** PySpark scripts are encapsulated in Python `try/except` execution blocks to ensure Workflows capture hard failures accurately.
 
-## Data Pipeline Layers
-
-### Bronze Layer (Raw Ingestion)
-- AWS Glue Crawler auto-discovers and catalogs raw CSV files from S3
-- Databricks reads the Glue-cataloged data and writes to Delta with audit metadata columns (`_ingestion_timestamp`, `_source_file`, `_batch_id`)
-- Partitioned by: `_ingestion_date`
-
-### Silver Layer (Cleaned & Conformed)
-- Standardizes categorical columns (gender, smoking_status)
-- Applies null handling and clinical range validation on health metrics
-- MERGE (upsert) ensures no duplicate `patient_id` records
-- Partitioned by: `diagnosis_code`
-
-### Gold Layer (Business Analytics)
-Four aggregated tables produced:
-1. **`gold_patient_risk`** — Patient risk scores (Low/Medium/High)
-2. **`gold_hospital_statistics`** — Per-hospital KPIs (disease rates, avg vitals)
-3. **`gold_diagnosis_analytics`** — Biomarkers per diagnosis type
-4. **`gold_daily_kpi`** — Daily executive summary metrics
-
----
-
-## Dataset
-
-File: `patient_records.csv` (~56,500 records, 32 columns)
-
-Key columns: `patient_id`, `age`, `gender`, `systolic_bp`, `diastolic_bp`, `cholesterol_total`, `fasting_glucose`, `hba1c`, `heart_rate`, `smoking_status`, `diabetes`, `hypertension`, `hospital_id`, `doctor_id`, `diagnosis_code`, `heart_disease`
-
----
-
-## Prerequisites
-
-- AWS Account with S3 and Glue access
-- Databricks Workspace (AWS-hosted)
-- Python 3.x + Git installed locally
-- Databricks Runtime 14.3 LTS (Spark 3.5.0)
-
----
-
-## Setup Instructions
-
-See the detailed step-by-step guide in:
-`docs/Healthcare_Patient_Analytics_Pipeline_Guide.txt`
-
----
-
-## Team
-
-Revature Data Engineering Batch — Project 2 (2026)
-
----
-
-## License
-
-MIT License — see [LICENSE](LICENSE)
+## ⏱️ Pipeline Scheduling
+The entire ETL workflow is mapped out as a Directed Acyclic Graph (DAG) using **Databricks Workflows**.
+- **Dependencies:** Task DAG established: `bronze_ingestion_task` ➔ `silver_transformation_task` ➔ `gold_analytics_task`.
+- **Schedule:** Automated to run daily at `0 2 * * *` (2:00 AM UTC).
+- **Alerting:** Configured custom email failure alerting for job states.
