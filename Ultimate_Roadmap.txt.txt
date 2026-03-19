@@ -1,0 +1,1323 @@
+================================================================================
+  HEALTHCARE PATIENT ANALYTICS BATCH PIPELINE
+  COMPLETE STEP-BY-STEP IMPLEMENTATION GUIDE
+  AWS Glue | S3 | Databricks | PySpark | Delta Lake | Medallion Architecture
+================================================================================
+  Version : 2.0
+  Date    : March 2026
+================================================================================
+
+HOW TO USE THIS GUIDE:
+  All configurable values (bucket names, regions, credentials) appear in a
+  CONFIGURATION BLOCK at the top of every notebook section. Edit those values
+  once to match your own setup. No hardcoded paths exist anywhere in this guide.
+
+TABLE OF CONTENTS
+-----------------
+  1.  Prerequisites
+  2.  AWS S3 Setup
+  3.  IAM Configuration (Databricks User + Glue Role)
+  4.  AWS Glue Setup (Crawler + Data Catalog)
+  5.  Databricks Cluster Setup
+  6.  Connect Databricks to S3 & Glue Catalog
+  7.  Create Databricks Notebooks
+  8.  Bronze Layer (Glue Catalog + Delta Ingestion)
+  9.  Silver Layer (Cleaning and Transformation)
+  10. Gold Layer (Analytics and KPIs)
+  11. Delta Lake Optimization
+  12. Data Quality Checks
+  13. Logging System
+  14. Pipeline Orchestration (Databricks Workflows)
+  15. Testing the Pipeline
+  16. Monitoring
+  17. Final Deployment Checklist
+
+================================================================================
+SECTION 1: PREREQUISITES
+================================================================================
+
+Before starting, confirm these are ready:
+
+1. AWS Account with S3 and Glue access
+   Verify: Open https://console.aws.amazon.com -- you see the dashboard.
+
+2. Databricks Workspace (AWS-hosted)
+   Verify: Open your workspace URL -- you see the Databricks sidebar.
+
+3. AWS CLI Configured on your local machine
+   Verify: Open terminal and run:
+     aws sts get-caller-identity
+   Expected: JSON output showing your AWS Account ID and User ARN.
+   If not configured: run "aws configure" and enter your credentials.
+
+4. Local tools
+   Git    : git --version   (expected: git version 2.x.x)
+   Python : python --version (expected: Python 3.x.x)
+   Boto3  : pip show boto3   (install with: pip install boto3)
+
+5. Source data file: patient_records.csv (the raw healthcare dataset)
+   You should have this file locally. It will be uploaded to S3 in Section 2.
+
+================================================================================
+SECTION 2: AWS S3 SETUP
+================================================================================
+
+NOTE: Your AWS account is already set up. This section only sets up the
+S3 bucket folder structure and uploads the source data file.
+
+STEP 2.1 - DEFINE YOUR BUCKET NAME
+  Choose a globally unique bucket name. Examples:
+    revature-health-data-2026
+    <your-team-name>-healthcare-pipeline
+
+  Use this name consistently throughout this guide wherever you see
+  <YOUR_BUCKET_NAME>.
+
+STEP 2.2 - CREATE S3 BUCKET (if not already created)
+  In AWS Console:
+  1. Search S3 -> click [Create bucket].
+  2. Bucket name: <YOUR_BUCKET_NAME>
+  3. Region: us-east-1 (or your preferred region)
+  4. Block ALL public access: keep all 4 boxes CHECKED.
+  5. Versioning: Enable.
+  6. Encryption: SSE-S3, Enabled.
+  7. Click [Create bucket].
+
+  OR via AWS CLI:
+    aws s3 mb s3://<YOUR_BUCKET_NAME> --region us-east-1
+
+STEP 2.3 - CREATE FOLDER STRUCTURE
+  AWS CLI (fastest method):
+    aws s3api put-object --bucket <YOUR_BUCKET_NAME> --key "raw/"
+    aws s3api put-object --bucket <YOUR_BUCKET_NAME> --key "bronze/"
+    aws s3api put-object --bucket <YOUR_BUCKET_NAME> --key "silver/"
+    aws s3api put-object --bucket <YOUR_BUCKET_NAME> --key "gold/"
+
+  Verify:
+    aws s3 ls s3://<YOUR_BUCKET_NAME>/
+  Expected output (PRE = folder/prefix):
+    PRE bronze/
+    PRE gold/
+    PRE raw/
+    PRE silver/
+
+STEP 2.4 - UPLOAD PATIENT DATA TO S3
+  Replace <YOUR_LOCAL_CSV_PATH> with the actual path to your CSV file.
+
+  Windows example:
+    aws s3 cp "C:\Users\YourName\Downloads\patient_records.csv" s3://<YOUR_BUCKET_NAME>/raw/patient_records.csv
+
+  Mac/Linux example:
+    aws s3 cp ~/Downloads/patient_records.csv s3://<YOUR_BUCKET_NAME>/raw/patient_records.csv
+
+  Verify:
+    aws s3 ls s3://<YOUR_BUCKET_NAME>/raw/
+  Expected: shows patient_records.csv with file size ~8.3 MB
+
+================================================================================
+SECTION 3: IAM CONFIGURATION
+================================================================================
+
+  You need TWO IAM setups:
+    A. IAM User with S3 + Glue permissions (used by Databricks to access data)
+    B. IAM Role for AWS Glue (used by Glue to read S3 and write to Data Catalog)
+
+--------------------------------------------------------------------------------
+PART A: IAM USER FOR DATABRICKS (S3 + Glue Read Access)
+--------------------------------------------------------------------------------
+
+STEP 3.1 - NAVIGATE TO IAM
+  AWS Console -> search: IAM -> click IAM.
+  Left sidebar -> [Users] -> [Add users].
+
+STEP 3.2 - CREATE THE USER
+  1. User name: databricks-pipeline-user
+  2. Click [Next].
+  3. Permissions: select "Attach policies directly".
+  4. Search and check:
+       [x] AmazonS3FullAccess
+       [x] AWSGlueConsoleFullAccess
+  5. Click [Next] -> [Create user].
+
+STEP 3.3 - GENERATE ACCESS KEYS
+  1. Click on user "databricks-pipeline-user".
+  2. Tab: [Security credentials] -> [Create access key].
+  3. Use case: Other -> [Next] -> [Create access key].
+
+  SAVE IMMEDIATELY:
+    Access Key ID     : AKIA... (starts with AKIA)
+    Secret Access Key : xxxx... (shown ONLY ONCE)
+  Click [Download .csv file].
+
+STEP 3.4 - CUSTOM PRODUCTION POLICY (replace AmazonS3FullAccess)
+  This is more secure as it scopes access to only your bucket and Glue catalog.
+
+  1. IAM -> [Policies] -> [Create policy] -> [JSON] tab.
+  2. Paste (replace <YOUR_BUCKET_NAME>):
+
+{
+    "Version": "2012-10-17",
+    "Statement": [
+        {
+            "Sid": "S3BucketAccess",
+            "Effect": "Allow",
+            "Action": ["s3:GetObject","s3:PutObject","s3:DeleteObject",
+                       "s3:ListBucket","s3:GetBucketLocation"],
+            "Resource": ["arn:aws:s3:::<YOUR_BUCKET_NAME>",
+                         "arn:aws:s3:::<YOUR_BUCKET_NAME>/*"]
+        },
+        {
+            "Sid": "GlueCatalogRead",
+            "Effect": "Allow",
+            "Action": ["glue:GetTable","glue:GetTables","glue:GetDatabase",
+                       "glue:GetDatabases","glue:GetPartition","glue:GetPartitions",
+                       "glue:BatchGetPartition"],
+            "Resource": ["*"]
+        }
+    ]
+}
+
+  3. Policy name: DatabricksHealthcarePipelinePolicy -> [Create policy].
+  4. Attach this policy to databricks-pipeline-user
+     (remove the broader AmazonS3FullAccess and AWSGlueConsoleFullAccess).
+
+--------------------------------------------------------------------------------
+PART B: IAM ROLE FOR AWS GLUE (so Glue can crawl S3)
+--------------------------------------------------------------------------------
+
+STEP 3.5 - CREATE GLUE IAM ROLE
+  1. IAM -> [Roles] -> [Create role].
+  2. Trusted entity type: AWS service.
+  3. Use case: Scroll down and select "Glue" -> click [Next].
+  4. Attach permissions:
+       [x] AmazonS3FullAccess
+       [x] AWSGlueServiceRole
+  5. Click [Next].
+  6. Role name: AWSGlueServiceRole-healthcare
+  7. Description: Allows Glue to crawl S3 and write to Glue Data Catalog
+  8. Click [Create role].
+
+STEP 3.6 - ADD INLINE POLICY FOR YOUR SPECIFIC BUCKET
+  1. Click on role "AWSGlueServiceRole-healthcare".
+  2. [Add permissions] -> [Create inline policy] -> [JSON] tab.
+  3. Paste (replace <YOUR_BUCKET_NAME>):
+
+{
+    "Version": "2012-10-17",
+    "Statement": [
+        {
+            "Effect": "Allow",
+            "Action": ["s3:GetObject","s3:PutObject","s3:ListBucket"],
+            "Resource": ["arn:aws:s3:::<YOUR_BUCKET_NAME>",
+                         "arn:aws:s3:::<YOUR_BUCKET_NAME>/*"]
+        }
+    ]
+}
+
+  4. Policy name: GlueS3BucketAccess -> [Create policy].
+
+================================================================================
+SECTION 4: AWS GLUE SETUP (CRAWLER + DATA CATALOG FOR BRONZE)
+================================================================================
+
+  WHY GLUE IN BRONZE?
+  In the Bronze layer, AWS Glue Crawler auto-discovers the raw patient CSV,
+  infers its schema, and registers it as a table in the Glue Data Catalog.
+  Databricks then reads this Glue-cataloged table directly using Spark SQL.
+  This eliminates manual schema definition for the raw layer and gives you
+  a centralised, auto-updated metadata catalog.
+
+  FLOW:
+    patient_records.csv (S3 raw/)
+           |
+           v
+    [Glue Crawler runs] -> scans file, infers schema
+           |
+           v
+    [Glue Data Catalog]  -> stores table "healthcare_raw.patient_records"
+           |
+           v
+    [Databricks reads] -> spark.read.table("healthcare_raw.patient_records")
+           |
+           v
+    [Bronze Delta Table] -> adds metadata, writes to Delta format
+
+STEP 4.1 - NAVIGATE TO AWS GLUE
+  1. AWS Console -> search: Glue -> click "AWS Glue".
+  2. You see the Glue Studio / Glue home dashboard.
+  Path: AWS Console > Search > AWS Glue
+
+STEP 4.2 - CREATE GLUE DATABASE
+  1. Left sidebar -> [Databases] (under Data Catalog section).
+  2. Click [Add database].
+  3. Database name: healthcare_raw
+     (This is the database that will hold your Glue-cataloged raw tables.)
+  4. Description: Raw patient data cataloged from S3 for Bronze layer ingestion
+  5. Location: s3://<YOUR_BUCKET_NAME>/raw/
+  6. Click [Create database].
+  Expected: "healthcare_raw" appears in the database list.
+
+STEP 4.3 - CREATE GLUE CRAWLER
+  1. Left sidebar -> [Crawlers] -> [Create crawler].
+
+  CRAWLER PROPERTIES (Page 1):
+    Name       : patient-records-crawler
+    Description: Auto-crawls patient_records.csv from S3 raw/ folder
+    Click [Next].
+
+  DATA SOURCES (Page 2):
+    1. Click [Add a data source].
+    2. Data source: S3
+    3. S3 path: s3://<YOUR_BUCKET_NAME>/raw/
+       (Click [Browse S3] and navigate to your raw/ folder)
+    4. Subsequent crawler runs: "Crawl all sub-folders"
+    5. Click [Add an S3 data source].
+    6. Click [Next].
+
+  IAM ROLE (Page 3):
+    1. Choose an existing IAM role.
+    2. Dropdown: select "AWSGlueServiceRole-healthcare"
+    3. Click [Next].
+
+  OUTPUT CONFIGURATION (Page 4):
+    1. Target database: select "healthcare_raw"
+    2. Table name prefix: leave EMPTY
+    3. Crawler schedule: "On demand"
+       (Databricks Workflows will trigger re-crawling on a schedule later.)
+    4. Click [Next].
+
+  REVIEW AND CREATE (Page 5):
+    Verify:
+      Crawler name : patient-records-crawler
+      S3 path      : s3://<YOUR_BUCKET_NAME>/raw/
+      IAM role     : AWSGlueServiceRole-healthcare
+      Target DB    : healthcare_raw
+    Click [Create crawler].
+
+STEP 4.4 - RUN THE CRAWLER
+  1. In Crawlers list, check the box next to "patient-records-crawler".
+  2. Click [Run] button.
+  3. Status changes to "Running" (wait 1-3 minutes).
+  4. Status returns to "Ready" with "Succeeded" in Last run column.
+  Look for errors in the Last run column. If failed, check:
+    - S3 path is correct.
+    - Glue Role has S3 access.
+    - The CSV file exists in the raw/ folder.
+
+STEP 4.5 - VERIFY THE GLUE TABLE WAS CREATED
+  1. Left sidebar -> [Tables] (under Data Catalog).
+  2. You should see a table in database "healthcare_raw".
+     The name is typically the folder name (e.g. "raw" or "patient_records").
+  3. Click on the table name to see its schema.
+  Expected columns: patient_id, age, gender, height_cm, weight_kg, bmi,
+    systolic_bp, diastolic_bp, cholesterol_total, hdl_cholesterol,
+    ldl_cholesterol, triglycerides, fasting_glucose, hba1c, heart_rate,
+    smoking_status, alcohol_consumption, physical_activity_level,
+    family_history_heart, diabetes, hypertension, chest_pain_type,
+    resting_ecg, exercise_induced_angina, max_heart_rate, oldpeak,
+    st_slope, hospital_id, doctor_id, diagnosis_code,
+    diagnosis_description, heart_disease
+
+  NOTE THE EXACT TABLE NAME -- you will use it in the Bronze notebook.
+  Update GLUE_TABLE in Section 8 to match.
+
+STEP 4.6 - INSTALL GLUE CATALOG CONNECTOR LIBRARY
+  Databricks needs a JAR to communicate with the Glue Data Catalog.
+
+  1. Go to Databricks -> Compute -> your cluster -> [Libraries] tab.
+  2. Click [Install new].
+  3. Library source: Maven
+  4. Maven coordinates: com.amazonaws:aws-glue-datacatalog-client-shaded:3.4.0
+  5. Click [Install].
+  6. Wait for status to show "Installed" (may need cluster restart).
+
+================================================================================
+SECTION 5: DATABRICKS CLUSTER SETUP
+================================================================================
+
+STEP 5.1 - LOG IN TO DATABRICKS
+  Open your Databricks workspace URL in browser.
+  Enter username and password -> click [Sign In].
+
+STEP 5.2 - NAVIGATE TO COMPUTE
+  Left sidebar -> click [Compute] -> [Create compute].
+
+STEP 5.3 - CLUSTER CONFIGURATION
+  CLUSTER NAME    : healthcare-pipeline-cluster
+  CLUSTER MODE    : Single Node (development) or Standard (production)
+  RUNTIME VERSION : 14.3 LTS (Scala 2.12, Spark 3.5.0)
+                    Always pick LTS = Long-Term Support.
+  NODE TYPE       : Standard_DS3_v2  (4 vCPU, 14 GB) recommended minimum
+  AUTO TERMINATION: Enable. Set to 60 minutes (saves cost on idle clusters).
+
+STEP 5.4 - CONFIGURE SPARK FOR GLUE CATALOG + S3 ACCESS
+  1. Expand "Advanced Options" -> click [Spark] tab.
+  2. In the "Spark config" box, paste the following lines.
+     Replace <YOUR_ACCESS_KEY_ID> and <YOUR_SECRET_KEY> with your IAM user keys.
+     Replace <YOUR_REGION> with your AWS region (e.g. us-east-1).
+
+spark.hadoop.fs.s3a.access.key                    <YOUR_ACCESS_KEY_ID>
+spark.hadoop.fs.s3a.secret.key                    <YOUR_SECRET_KEY>
+spark.hadoop.fs.s3a.endpoint                      s3.amazonaws.com
+spark.hadoop.fs.s3a.impl                          org.apache.hadoop.fs.s3a.S3AFileSystem
+spark.hadoop.hive.metastore.client.factory.class  com.amazonaws.glue.catalog.metastore.AWSGlueDataCatalogHiveClientFactory
+spark.hadoop.aws.glue.region                      <YOUR_REGION>
+
+  3. Click [Create compute].
+  Wait 3-7 minutes for status to show green "Running".
+
+STEP 5.5 - INSTALL GLUE CATALOG LIBRARY ON CLUSTER
+  1. Click on your cluster name -> [Libraries] tab.
+  2. Click [Install new].
+  3. Library source: Maven
+  4. Coordinates: com.amazonaws:aws-glue-datacatalog-client-shaded:3.4.0
+  5. Click [Install].
+  6. Wait for status: Installed (you may need to restart the cluster).
+
+================================================================================
+SECTION 6: CONNECT DATABRICKS TO S3 AND GLUE
+================================================================================
+
+STEP 6.1 - TEST S3 CONNECTION
+  Create a new notebook, attach the cluster, and run:
+
+  # Cell 1: Verify S3 access
+  S3_BUCKET = "s3a://<YOUR_BUCKET_NAME>"
+  files = dbutils.fs.ls(f"{S3_BUCKET}/raw/")
+  for f in files:
+      print(f.name, f.size)
+  # Expected: patient_records.csv   8332723
+
+STEP 6.2 - TEST GLUE CATALOG CONNECTION
+  In the same notebook, add a cell:
+
+  # Cell 2: Verify Glue Data Catalog access
+  spark.sql("SHOW DATABASES").show()
+  # Expected: healthcare_raw should appear in the list
+
+  spark.sql("SHOW TABLES IN healthcare_raw").show()
+  # Expected: patient_records (or whatever the Crawler named the table)
+
+  spark.sql("SELECT COUNT(*) as total FROM healthcare_raw.<GLUE_TABLE_NAME>").show()
+  # Expected: total = ~56501
+
+  # Inspect schema from Glue catalog:
+  spark.sql("DESCRIBE healthcare_raw.<GLUE_TABLE_NAME>").show(50, truncate=False)
+
+STEP 6.3 - NOTE YOUR GLUE TABLE NAME
+  From Step 6.2 output, note the exact table name the Crawler created.
+  Update <GLUE_TABLE_NAME> in all subsequent notebook cells.
+  Typically it matches the folder name: "raw" or the filename prefix.
+
+================================================================================
+SECTION 7: CREATE DATABRICKS NOTEBOOKS
+================================================================================
+
+STEP 7.1 - CREATE PROJECT FOLDER
+  1. Left sidebar -> [Workspace] -> [Home].
+  2. Click [+] -> [Create] -> [Folder].
+  3. Folder name: healthcare_pipeline -> Enter.
+  4. Inside: create sub-folder: notebooks
+
+  Workspace structure:
+    Home/
+      healthcare_pipeline/
+        notebooks/
+
+STEP 7.2 - CREATE FOUR NOTEBOOKS
+  In: Workspace -> Home -> healthcare_pipeline -> notebooks/
+  For each: [+] -> [Notebook] -> set Name, Language=Python,
+  Cluster=healthcare-pipeline-cluster -> [Create]
+
+  Create all four:
+    00_setup_and_config
+    01_bronze_ingestion
+    02_silver_transformation
+    03_gold_analytics
+
+================================================================================
+SECTION 8: BRONZE LAYER - GLUE CATALOG + DELTA INGESTION
+================================================================================
+
+Open notebook: 01_bronze_ingestion
+
+=== CELL 1 (Markdown) ===
+  # Bronze Layer - Glue Catalog Ingestion
+  ## Healthcare Patient Analytics Pipeline
+  Reads raw data from AWS Glue Data Catalog and writes to Bronze Delta table.
+
+=== CELL 2: CONFIGURATION BLOCK ===
+  Edit these values to match your setup before running.
+
+  import uuid
+  from pyspark.sql.functions import current_timestamp, input_file_name, lit, to_date
+
+  # ============================================================
+  # CONFIGURATION - Edit these values for your environment
+  # ============================================================
+  S3_BUCKET_NAME = "your-s3-bucket-name"      # No s3:// prefix here
+  S3_BUCKET      = f"s3a://{S3_BUCKET_NAME}"
+
+  GLUE_DATABASE  = "healthcare_raw"            # Glue Data Catalog DB name
+  GLUE_TABLE     = "raw"                       # Table name Glue Crawler created
+                                               # (check Section 6.3 for exact name)
+  DATABASE_NAME  = "healthcare"                # Databricks Delta database name
+  BRONZE_TABLE   = "bronze_patient_records"
+  BRONZE_PATH    = f"{S3_BUCKET}/bronze/patient_records"
+
+  AWS_REGION     = "us-east-1"                # Your AWS region
+
+  BATCH_ID = str(uuid.uuid4())[:8]
+  print(f"Batch ID     : {BATCH_ID}")
+  print(f"Reading from : {GLUE_DATABASE}.{GLUE_TABLE}")
+  print(f"Writing to   : {S3_BUCKET}/bronze/patient_records")
+  # ============================================================
+
+=== CELL 3: CREATE DELTA DATABASE ===
+
+  spark.sql(f"CREATE DATABASE IF NOT EXISTS {DATABASE_NAME}")
+  spark.sql(f"USE {DATABASE_NAME}")
+  print(f"Using Delta database: {DATABASE_NAME}")
+
+=== CELL 4: READ FROM GLUE DATA CATALOG ===
+
+  # Read raw data from the Glue-cataloged table.
+  # Spark connects to Glue metastore using the cluster Spark config
+  # set in Section 5.4. No credentials needed here.
+
+  raw_df = spark.sql(f"SELECT * FROM {GLUE_DATABASE}.{GLUE_TABLE}")
+
+  print(f"Rows read from Glue catalog : {raw_df.count():,}")
+  print(f"Columns                     : {len(raw_df.columns)}")
+  raw_df.printSchema()
+  raw_df.show(5, truncate=False)
+
+  # WHY THIS APPROACH:
+  # The Glue Crawler already inferred the schema automatically.
+  # We get the schema for free without defining 32 StructFields manually.
+  # Glue acts as a central schema registry for the raw layer.
+
+=== CELL 5: ADD BRONZE METADATA COLUMNS ===
+
+  # Metadata columns are added ONLY at Bronze stage.
+  # They enable traceability, auditing, and incremental processing.
+
+  bronze_df = (raw_df
+      .withColumn("_ingestion_timestamp", current_timestamp())
+      .withColumn("_source_file",         input_file_name())
+      .withColumn("_batch_id",            lit(BATCH_ID))
+      .withColumn("_ingestion_date",      to_date(current_timestamp())))
+
+  print(f"Bronze columns (original + metadata): {len(bronze_df.columns)}")
+  print("Metadata columns added:")
+  print("  _ingestion_timestamp : Exact timestamp when Databricks ingested the data")
+  print("  _source_file         : S3 path of the source file")
+  print("  _batch_id            : Unique ID for this pipeline run batch")
+  print("  _ingestion_date      : Date of ingestion (used for partitioning)")
+
+=== CELL 6: ENFORCE TYPES (OPTIONAL BUT RECOMMENDED) ===
+
+  # Glue may infer some columns as strings. Cast critical columns to correct types.
+
+  from pyspark.sql.functions import col
+  from pyspark.sql.types import IntegerType, DoubleType
+
+  numeric_int_cols = [
+      "patient_id","age","height_cm","weight_kg","systolic_bp","diastolic_bp",
+      "cholesterol_total","hdl_cholesterol","ldl_cholesterol","triglycerides",
+      "fasting_glucose","heart_rate","diabetes","hypertension",
+      "max_heart_rate","hospital_id","doctor_id","heart_disease"
+  ]
+  numeric_dbl_cols = ["bmi","hba1c","oldpeak"]
+
+  for c in numeric_int_cols:
+      if c in bronze_df.columns:
+          bronze_df = bronze_df.withColumn(c, col(c).cast(IntegerType()))
+  for c in numeric_dbl_cols:
+      if c in bronze_df.columns:
+          bronze_df = bronze_df.withColumn(c, col(c).cast(DoubleType()))
+
+  print("Type casting applied to numeric columns.")
+
+=== CELL 7: WRITE TO BRONZE DELTA TABLE ===
+
+  # mode="append" - Bronze is an immutable append-only archive.
+  # Every pipeline run adds a new partition (_ingestion_date).
+
+  (bronze_df.write
+      .format("delta")
+      .mode("append")
+      .partitionBy("_ingestion_date")
+      .option("mergeSchema", "true")
+      .save(BRONZE_PATH))
+
+  # Register in Hive Metastore for SQL access
+  spark.sql(f"""
+      CREATE TABLE IF NOT EXISTS {DATABASE_NAME}.{BRONZE_TABLE}
+      USING DELTA LOCATION '{BRONZE_PATH}'
+  """)
+
+  print(f"Bronze Delta table: {DATABASE_NAME}.{BRONZE_TABLE}")
+  print(f"Physical location : {BRONZE_PATH}")
+
+=== CELL 8: VALIDATE BRONZE TABLE ===
+
+  bronze_count = spark.sql(
+      f"SELECT COUNT(*) AS c FROM {DATABASE_NAME}.{BRONZE_TABLE}"
+  ).collect()[0]["c"]
+  print(f"Bronze row count: {bronze_count:,}")
+
+  spark.sql(f"SHOW PARTITIONS {DATABASE_NAME}.{BRONZE_TABLE}").show()
+  spark.sql(f"DESCRIBE HISTORY {DATABASE_NAME}.{BRONZE_TABLE}").show(3, truncate=False)
+
+  # Expected:
+  # Row count         : ~56,501
+  # Partition shown   : _ingestion_date=<today's date>
+  # Delta history     : version 0, operation=WRITE
+
+================================================================================
+SECTION 9: SILVER LAYER - CLEANING AND TRANSFORMATION
+================================================================================
+
+Open notebook: 02_silver_transformation
+
+=== CELL 1 (Markdown) ===
+  # Silver Layer - Data Cleaning and Transformation
+  Reads from Bronze Delta, cleans and validates data, writes to Silver via MERGE.
+
+=== CELL 2: CONFIGURATION BLOCK ===
+
+  from pyspark.sql.functions import (col, when, upper, trim, lit,
+      current_timestamp, count as spark_count)
+  from delta.tables import DeltaTable
+  import uuid
+
+  # ============================================================
+  # CONFIGURATION - Edit these values for your environment
+  # ============================================================
+  S3_BUCKET_NAME = "your-s3-bucket-name"
+  S3_BUCKET      = f"s3a://{S3_BUCKET_NAME}"
+  SILVER_PATH    = f"{S3_BUCKET}/silver/patient_records"
+  DATABASE_NAME  = "healthcare"
+  BRONZE_TABLE   = f"{DATABASE_NAME}.bronze_patient_records"
+  SILVER_TABLE   = f"{DATABASE_NAME}.silver_patient_records"
+  BATCH_ID       = str(uuid.uuid4())[:8]
+  # ============================================================
+
+  spark.sql(f"USE {DATABASE_NAME}")
+  print(f"Reading from: {BRONZE_TABLE}")
+  print(f"Writing to  : {SILVER_TABLE}")
+
+=== CELL 3: READ LATEST BRONZE DATA (INCREMENTAL) ===
+
+  # Only process records from the most recent ingestion date.
+  # Incremental processing: don't reprocess what was already cleaned.
+
+  latest_date = spark.sql(
+      f"SELECT MAX(_ingestion_date) AS d FROM {BRONZE_TABLE}"
+  ).collect()[0]["d"]
+  print(f"Processing Bronze data from: {latest_date}")
+
+  bronze_df = spark.sql(
+      f"SELECT * FROM {BRONZE_TABLE} WHERE _ingestion_date = '{latest_date}'"
+  )
+  print(f"Records to process: {bronze_df.count():,}")
+
+=== CELL 4: STANDARDIZE GENDER ===
+  Raw values: M, Male, F, Female, Unknown, None
+  Target    : Male, Female, Unknown
+
+  cleaned_df = bronze_df.withColumn("gender",
+      when(upper(trim(col("gender"))).isin("M", "MALE"),    "Male")
+      .when(upper(trim(col("gender"))).isin("F", "FEMALE"), "Female")
+      .otherwise("Unknown"))
+
+  print("Gender distribution after standardization:")
+  cleaned_df.groupBy("gender").count().orderBy("count", ascending=False).show()
+
+=== CELL 5: STANDARDIZE SMOKING STATUS ===
+  Raw values: YES, yes, No, NO, None
+  Target    : Yes, No, Unknown
+
+  cleaned_df = cleaned_df.withColumn("smoking_status",
+      when(upper(trim(col("smoking_status"))).isin("YES","Y"), "Yes")
+      .when(upper(trim(col("smoking_status"))).isin("NO","N"),  "No")
+      .otherwise("Unknown"))
+
+  print("Smoking status after standardization:")
+  cleaned_df.groupBy("smoking_status").count().show()
+
+=== CELL 6: NULL HANDLING ===
+
+  # Drop rows with no patient_id (cannot be used in analytics)
+  cleaned_df = cleaned_df.dropna(subset=["patient_id"])
+
+  # Fill categorical nulls
+  cat_cols = ["gender","smoking_status","alcohol_consumption",
+              "physical_activity_level","chest_pain_type",
+              "resting_ecg","st_slope","diagnosis_code",
+              "diagnosis_description","exercise_induced_angina"]
+  cleaned_df = cleaned_df.fillna("Unknown", subset=cat_cols)
+  cleaned_df = cleaned_df.fillna({"family_history_heart": "No"})
+  cleaned_df = cleaned_df.fillna(0, subset=["diabetes","hypertension","heart_disease"])
+  print("Null handling complete.")
+
+=== CELL 7: CLINICAL RANGE VALIDATION ===
+  Values outside realistic clinical ranges are set to NULL.
+
+  cleaned_df = (cleaned_df
+      .withColumn("age",
+          when((col("age") >= 0) & (col("age") <= 120), col("age")).otherwise(None))
+      .withColumn("systolic_bp",
+          when((col("systolic_bp") >= 50) & (col("systolic_bp") <= 300),
+               col("systolic_bp")).otherwise(None))
+      .withColumn("diastolic_bp",
+          when((col("diastolic_bp") >= 30) & (col("diastolic_bp") <= 200),
+               col("diastolic_bp")).otherwise(None))
+      .withColumn("heart_rate",
+          when((col("heart_rate") >= 30) & (col("heart_rate") <= 250),
+               col("heart_rate")).otherwise(None))
+      .withColumn("bmi",
+          when((col("bmi") >= 10) & (col("bmi") <= 80), col("bmi")).otherwise(None))
+      .withColumn("fasting_glucose",
+          when((col("fasting_glucose") >= 40) & (col("fasting_glucose") <= 600),
+               col("fasting_glucose")).otherwise(None)))
+  print("Range validation applied.")
+
+=== CELL 8: DEDUPLICATION ===
+
+  before = cleaned_df.count()
+  cleaned_df = cleaned_df.dropDuplicates(["patient_id"])
+  after = cleaned_df.count()
+  print(f"Before dedup: {before:,}  |  After: {after:,}  |  Removed: {before - after:,}")
+
+=== CELL 9: ADD SILVER METADATA ===
+
+  silver_df = (cleaned_df
+      .withColumn("_silver_timestamp", current_timestamp())
+      .withColumn("_silver_batch_id",  lit(BATCH_ID))
+      .drop("_ingestion_timestamp","_source_file","_batch_id"))
+  print(f"Silver DataFrame: {len(silver_df.columns)} columns")
+
+=== CELL 10: WRITE SILVER VIA MERGE (UPSERT) ===
+  MERGE = UPDATE if patient_id exists, INSERT if new.
+  Prevents duplicates across daily runs.
+
+  if not DeltaTable.isDeltaTable(spark, SILVER_PATH):
+      (silver_df.write.format("delta").mode("overwrite")
+          .option("overwriteSchema","true")
+          .partitionBy("diagnosis_code")
+          .save(SILVER_PATH))
+
+  spark.sql(f"""
+      CREATE TABLE IF NOT EXISTS {SILVER_TABLE}
+      USING DELTA LOCATION '{SILVER_PATH}'
+  """)
+
+  delta_tbl = DeltaTable.forPath(spark, SILVER_PATH)
+  (delta_tbl.alias("target")
+      .merge(silver_df.alias("source"), "target.patient_id = source.patient_id")
+      .whenMatchedUpdateAll()
+      .whenNotMatchedInsertAll()
+      .execute())
+
+  silver_count = spark.sql(f"SELECT COUNT(*) AS c FROM {SILVER_TABLE}").collect()[0]["c"]
+  print(f"Silver table total records: {silver_count:,}")
+
+=== CELL 11: VALIDATE SILVER ===
+
+  spark.sql(f"SELECT gender, COUNT(*) AS cnt FROM {SILVER_TABLE} GROUP BY gender").show()
+  spark.sql(f"""
+      SELECT diagnosis_description, COUNT(*) AS patients
+      FROM {SILVER_TABLE} WHERE diagnosis_description != 'Unknown'
+      GROUP BY diagnosis_description ORDER BY patients DESC LIMIT 10
+  """).show()
+
+================================================================================
+SECTION 10: GOLD LAYER - ANALYTICS AND KPIs
+================================================================================
+
+Open notebook: 03_gold_analytics
+
+=== CELL 1 (Markdown) ===
+  # Gold Layer - Business Analytics and KPIs
+  Aggregations from Silver: risk scores, hospital stats, diagnosis analytics.
+
+=== CELL 2: CONFIGURATION BLOCK ===
+
+  from pyspark.sql.functions import (col, avg, count, sum as spark_sum,
+      round as spark_round, when, countDistinct, lit, current_date)
+  from delta.tables import DeltaTable
+  import uuid
+
+  # ============================================================
+  # CONFIGURATION - Edit these values for your environment
+  # ============================================================
+  S3_BUCKET_NAME = "your-s3-bucket-name"
+  S3_BUCKET      = f"s3a://{S3_BUCKET_NAME}"
+  GOLD_PATH      = f"{S3_BUCKET}/gold"
+  DATABASE_NAME  = "healthcare"
+  SILVER_TABLE   = f"{DATABASE_NAME}.silver_patient_records"
+  BATCH_ID       = str(uuid.uuid4())[:8]
+  # ============================================================
+
+  spark.sql(f"USE {DATABASE_NAME}")
+
+=== CELL 3: READ SILVER DATA ===
+
+  silver_df = spark.sql(f"SELECT * FROM {SILVER_TABLE}")
+  print(f"Silver records: {silver_df.count():,}")
+
+=== CELL 4: GOLD TABLE 1 - PATIENT RISK SCORES ===
+  Risk score (0-100) based on clinical risk factors:
+    Age > 60             = +15   Systolic BP > 140 = +15
+    Diabetes = 1         = +20   Smoking = Yes     = +15
+    Hypertension = 1     = +10   Family Hx = Yes   = +10
+    BMI > 30             = +10   Cholesterol > 240 = +5
+  Category: Low (0-30), Medium (31-60), High (61+)
+
+  risk_df = (silver_df
+      .withColumn("risk_score",
+          (when(col("age") > 60, 15).otherwise(0)) +
+          (when(col("systolic_bp") > 140, 15).otherwise(0)) +
+          (when(col("diabetes") == 1, 20).otherwise(0)) +
+          (when(col("smoking_status") == "Yes", 15).otherwise(0)) +
+          (when(col("hypertension") == 1, 10).otherwise(0)) +
+          (when(col("family_history_heart") == "Yes", 10).otherwise(0)) +
+          (when(col("bmi") > 30, 10).otherwise(0)) +
+          (when(col("cholesterol_total") > 240, 5).otherwise(0)))
+      .withColumn("risk_category",
+          when(col("risk_score") <= 30, "Low")
+          .when(col("risk_score") <= 60, "Medium")
+          .otherwise("High"))
+      .select("patient_id","age","gender","hospital_id","doctor_id",
+              "diagnosis_code","diagnosis_description","heart_disease",
+              "risk_score","risk_category",
+              "systolic_bp","diastolic_bp","cholesterol_total","fasting_glucose","hba1c","bmi"))
+
+  GOLD_RISK_PATH = f"{GOLD_PATH}/patient_risk_scores"
+  (risk_df.write.format("delta").mode("overwrite")
+      .partitionBy("risk_category").save(GOLD_RISK_PATH))
+  spark.sql(f"""
+      CREATE TABLE IF NOT EXISTS {DATABASE_NAME}.gold_patient_risk
+      USING DELTA LOCATION '{GOLD_RISK_PATH}'
+  """)
+  risk_df.groupBy("risk_category").count().orderBy("count", ascending=False).show()
+
+=== CELL 5: GOLD TABLE 2 - HOSPITAL STATISTICS ===
+
+  hosp_df = silver_df.groupBy("hospital_id").agg(
+      count("*").alias("total_patients"),
+      countDistinct("doctor_id").alias("total_doctors"),
+      spark_round(avg("age"), 1).alias("avg_patient_age"),
+      spark_round(avg("systolic_bp"), 1).alias("avg_systolic_bp"),
+      spark_round(avg("bmi"), 1).alias("avg_bmi"),
+      spark_round(avg("cholesterol_total"), 1).alias("avg_cholesterol"),
+      spark_round(avg("heart_rate"), 1).alias("avg_heart_rate"),
+      spark_round(avg("fasting_glucose"), 1).alias("avg_fasting_glucose"),
+      spark_round(avg("hba1c"), 2).alias("avg_hba1c"),
+      spark_round((spark_sum("heart_disease") / count("*")) * 100, 2).alias("heart_disease_rate_pct"),
+      spark_round((spark_sum("diabetes") / count("*")) * 100, 2).alias("diabetes_rate_pct"),
+      spark_round((spark_sum("hypertension") / count("*")) * 100, 2).alias("hypertension_rate_pct"))
+
+  GOLD_HOSP_PATH = f"{GOLD_PATH}/hospital_statistics"
+  (hosp_df.write.format("delta").mode("overwrite")
+      .partitionBy("hospital_id").save(GOLD_HOSP_PATH))
+  spark.sql(f"""
+      CREATE TABLE IF NOT EXISTS {DATABASE_NAME}.gold_hospital_statistics
+      USING DELTA LOCATION '{GOLD_HOSP_PATH}'
+  """)
+  hosp_df.orderBy("total_patients", ascending=False).show(10)
+
+=== CELL 6: GOLD TABLE 3 - DIAGNOSIS ANALYTICS ===
+
+  diag_df = (silver_df
+      .filter(col("diagnosis_description") != "Unknown")
+      .groupBy("diagnosis_code","diagnosis_description")
+      .agg(
+          count("*").alias("patient_count"),
+          spark_round(avg("age"), 1).alias("avg_age"),
+          spark_round(avg("systolic_bp"), 1).alias("avg_systolic_bp"),
+          spark_round(avg("cholesterol_total"), 1).alias("avg_cholesterol"),
+          spark_round(avg("hba1c"), 2).alias("avg_hba1c"),
+          spark_round(avg("fasting_glucose"), 1).alias("avg_glucose"),
+          spark_round(avg("bmi"), 1).alias("avg_bmi"),
+          spark_round(avg("heart_rate"), 1).alias("avg_heart_rate"),
+          spark_round((spark_sum("heart_disease") / count("*")) * 100, 2).alias("heart_disease_pct"))
+      .orderBy("patient_count", ascending=False))
+
+  GOLD_DIAG_PATH = f"{GOLD_PATH}/diagnosis_analytics"
+  (diag_df.write.format("delta").mode("overwrite").save(GOLD_DIAG_PATH))
+  spark.sql(f"""
+      CREATE TABLE IF NOT EXISTS {DATABASE_NAME}.gold_diagnosis_analytics
+      USING DELTA LOCATION '{GOLD_DIAG_PATH}'
+  """)
+  diag_df.show(truncate=False)
+
+=== CELL 7: GOLD TABLE 4 - DAILY KPI SUMMARY ===
+
+  kpi_df = silver_df.agg(
+      count("*").alias("total_patients_processed"),
+      lit(str(current_date())).alias("report_date"),
+      spark_round(avg("age"), 1).alias("avg_age"),
+      spark_round(avg("systolic_bp"), 1).alias("avg_systolic_bp"),
+      spark_round(avg("heart_rate"), 1).alias("avg_heart_rate"),
+      spark_round(avg("bmi"), 1).alias("avg_bmi"),
+      spark_round(avg("cholesterol_total"), 1).alias("avg_cholesterol"),
+      spark_round((spark_sum("heart_disease") / count("*")) * 100, 2).alias("heart_disease_rate_pct"),
+      spark_round((spark_sum("diabetes") / count("*")) * 100, 2).alias("diabetes_rate_pct"),
+      spark_round((spark_sum("hypertension") / count("*")) * 100, 2).alias("hypertension_rate_pct"),
+      countDistinct("hospital_id").alias("hospitals_covered"),
+      countDistinct("doctor_id").alias("doctors_involved"))
+
+  GOLD_KPI_PATH = f"{GOLD_PATH}/daily_kpi_summary"
+  (kpi_df.write.format("delta").mode("append").save(GOLD_KPI_PATH))
+  spark.sql(f"""
+      CREATE TABLE IF NOT EXISTS {DATABASE_NAME}.gold_daily_kpi
+      USING DELTA LOCATION '{GOLD_KPI_PATH}'
+  """)
+  kpi_df.show(truncate=False, vertical=True)
+
+================================================================================
+SECTION 11: DELTA LAKE OPTIMIZATION
+================================================================================
+
+Run these periodically (e.g., weekly) to maintain peak performance.
+
+STEP 11.1 - OPTIMIZE (File Compaction)
+  Merges many small Parquet files into larger, efficient ones (~128MB each).
+
+  spark.sql("OPTIMIZE healthcare.bronze_patient_records")
+  spark.sql("OPTIMIZE healthcare.silver_patient_records")
+  spark.sql("OPTIMIZE healthcare.gold_patient_risk")
+  spark.sql("OPTIMIZE healthcare.gold_hospital_statistics")
+  spark.sql("OPTIMIZE healthcare.gold_diagnosis_analytics")
+
+STEP 11.2 - ZORDER (Query-Oriented Clustering)
+  Co-locates related rows in the same files for much faster filtered queries.
+  Think of it as a physical index.
+
+  spark.sql("OPTIMIZE healthcare.bronze_patient_records ZORDER BY (patient_id)")
+  spark.sql("OPTIMIZE healthcare.silver_patient_records ZORDER BY (patient_id, hospital_id, diagnosis_code)")
+  spark.sql("OPTIMIZE healthcare.gold_patient_risk ZORDER BY (hospital_id, risk_category)")
+
+STEP 11.3 - VACUUM (Delete Old File Versions)
+  WARNING: After VACUUM you cannot time-travel to deleted versions.
+  168 hours = 7-day retention period (recommended minimum).
+
+  spark.sql("VACUUM healthcare.bronze_patient_records RETAIN 168 HOURS")
+  spark.sql("VACUUM healthcare.silver_patient_records RETAIN 168 HOURS")
+  spark.sql("VACUUM healthcare.gold_patient_risk RETAIN 168 HOURS")
+
+STEP 11.4 - TIME TRAVEL QUERIES
+
+  # View full history of changes
+  spark.sql("DESCRIBE HISTORY healthcare.silver_patient_records").show(5, truncate=False)
+
+  # Read table as it looked at version 0
+  old_df = (spark.read.format("delta")
+      .option("versionAsOf", 0)
+      .load("s3a://<YOUR_BUCKET_NAME>/silver/patient_records"))
+
+  # Read table at a specific timestamp
+  old_df2 = (spark.read.format("delta")
+      .option("timestampAsOf", "2026-03-01 00:00:00")
+      .load("s3a://<YOUR_BUCKET_NAME>/silver/patient_records"))
+
+STEP 11.5 - ANALYZE TABLE (Help Query Optimizer)
+
+  spark.sql("ANALYZE TABLE healthcare.silver_patient_records COMPUTE STATISTICS FOR ALL COLUMNS")
+  spark.sql("ANALYZE TABLE healthcare.gold_patient_risk COMPUTE STATISTICS FOR ALL COLUMNS")
+
+================================================================================
+SECTION 12: DATA QUALITY CHECKS
+================================================================================
+
+Add to Silver notebook after the MERGE, or create notebook: 04_data_quality
+
+=== CELL 1: DEFINE QUALITY CHECK FUNCTIONS ===
+
+  from pyspark.sql.functions import col
+
+  def check_null_rate(df, column_name, threshold_pct=5.0):
+      total = df.count()
+      nulls = df.filter(col(column_name).isNull()).count()
+      null_pct = (nulls / total) * 100 if total > 0 else 0
+      status = "PASS" if null_pct <= threshold_pct else "FAIL"
+      print(f"[{status}] Null rate '{column_name}': {null_pct:.2f}% ({nulls}/{total})"
+            f" | Threshold: {threshold_pct}%")
+      return status == "PASS"
+
+  def check_duplicate_rate(df, key_column, threshold_pct=0.0):
+      total = df.count()
+      distinct = df.select(key_column).distinct().count()
+      dups = total - distinct
+      dup_pct = (dups / total) * 100 if total > 0 else 0
+      status = "PASS" if dup_pct <= threshold_pct else "FAIL"
+      print(f"[{status}] Duplicate rate '{key_column}': {dup_pct:.4f}% ({dups} dups)"
+            f" | Threshold: {threshold_pct}%")
+      return status == "PASS"
+
+  def check_value_range(df, column_name, min_val, max_val, threshold_pct=1.0):
+      total = df.count()
+      out = df.filter((col(column_name) < min_val) | (col(column_name) > max_val)).count()
+      out_pct = (out / total) * 100 if total > 0 else 0
+      status = "PASS" if out_pct <= threshold_pct else "FAIL"
+      print(f"[{status}] Range check '{column_name}' [{min_val}-{max_val}]:"
+            f" {out_pct:.2f}% out-of-range | Threshold: {threshold_pct}%")
+      return status == "PASS"
+
+=== CELL 2: RUN ALL CHECKS ===
+
+  silver_df = spark.sql("SELECT * FROM healthcare.silver_patient_records")
+
+  print("=" * 60)
+  print("  DATA QUALITY REPORT - SILVER LAYER")
+  print("=" * 60)
+
+  results = []
+  results.append(check_null_rate(silver_df, "patient_id",    threshold_pct=0.0))
+  results.append(check_null_rate(silver_df, "age",           threshold_pct=1.0))
+  results.append(check_null_rate(silver_df, "systolic_bp",   threshold_pct=5.0))
+  results.append(check_null_rate(silver_df, "heart_disease", threshold_pct=0.5))
+  results.append(check_duplicate_rate(silver_df, "patient_id", threshold_pct=0.0))
+  results.append(check_value_range(silver_df, "age",         0,   120))
+  results.append(check_value_range(silver_df, "systolic_bp", 50,  300))
+  results.append(check_value_range(silver_df, "heart_rate",  30,  250))
+  results.append(check_value_range(silver_df, "bmi",         10,   80))
+
+  all_passed = all(results)
+  print("=" * 60)
+  print(f"OVERALL QUALITY STATUS: {'PASS' if all_passed else 'FAIL'}")
+  print("=" * 60)
+
+  if not all_passed:
+      raise Exception("Data quality checks FAILED. Pipeline halted. Check report above.")
+
+================================================================================
+SECTION 13: LOGGING SYSTEM
+================================================================================
+
+=== CELL 1: CREATE LOGGING DELTA TABLE (run once) ===
+
+  # ============================================================
+  # CONFIGURATION
+  S3_BUCKET_NAME = "your-s3-bucket-name"
+  S3_BUCKET      = f"s3a://{S3_BUCKET_NAME}"
+  LOG_PATH       = f"{S3_BUCKET}/gold/pipeline_log"
+  DATABASE_NAME  = "healthcare"
+  # ============================================================
+
+  spark.sql(f"""
+      CREATE TABLE IF NOT EXISTS {DATABASE_NAME}.pipeline_log (
+          log_id            STRING,
+          pipeline_run_id   STRING,
+          notebook_name     STRING,
+          layer             STRING,
+          status            STRING,
+          start_time        TIMESTAMP,
+          end_time          TIMESTAMP,
+          duration_seconds  DOUBLE,
+          records_processed LONG,
+          error_message     STRING,
+          created_at        TIMESTAMP
+      ) USING DELTA LOCATION '{LOG_PATH}'
+  """)
+  print("pipeline_log table ready.")
+
+=== CELL 2: LOGGING FUNCTION ===
+
+  from pyspark.sql import Row
+  from datetime import datetime
+  import uuid
+
+  def log_pipeline_event(notebook_name, layer, status, run_id,
+                          records_processed=0, error_message=None, start_time=None):
+      now = datetime.utcnow()
+      duration = (now - start_time).total_seconds() if start_time else 0.0
+      log_row = Row(
+          log_id=str(uuid.uuid4()), pipeline_run_id=run_id,
+          notebook_name=notebook_name, layer=layer, status=status,
+          start_time=start_time, end_time=now, duration_seconds=duration,
+          records_processed=records_processed,
+          error_message=error_message or "", created_at=now)
+      spark.createDataFrame([log_row]).write.format("delta").mode("append") \
+          .save(LOG_PATH)
+      print(f"[LOG] {layer} | {notebook_name} | {status} | {records_processed:,} rows | {duration:.1f}s")
+
+=== CELL 3: WRAP NOTEBOOKS WITH TRY/EXCEPT ===
+
+  from datetime import datetime
+  start = datetime.utcnow()
+  try:
+      # ... your main notebook code here ...
+      log_pipeline_event("01_bronze_ingestion", "Bronze", "SUCCESS",
+          BATCH_ID, records_processed=bronze_count, start_time=start)
+  except Exception as e:
+      log_pipeline_event("01_bronze_ingestion", "Bronze", "FAILED",
+          BATCH_ID, error_message=str(e), start_time=start)
+      raise e   # Re-raise so Workflows marks the run as failed
+
+=== CELL 4: VIEW LOGS ===
+
+  spark.sql("""
+      SELECT notebook_name, status, records_processed,
+             ROUND(duration_seconds, 1) AS dur_sec,
+             error_message, DATE(created_at) AS run_date
+      FROM healthcare.pipeline_log
+      ORDER BY created_at DESC LIMIT 20
+  """).show(truncate=False)
+
+================================================================================
+SECTION 14: PIPELINE ORCHESTRATION (DATABRICKS WORKFLOWS)
+================================================================================
+
+STEP 14.1 - NAVIGATE TO WORKFLOWS
+  Left sidebar -> [Workflows] -> [Create job].
+
+STEP 14.2 - JOB NAME
+  Enter: healthcare_patient_analytics_pipeline
+
+STEP 14.3 - ADD TASK 1: BRONZE INGESTION
+  Task name : bronze_ingestion_task
+  Type      : Notebook
+  Source    : Workspace
+  Path      : Browse to Home/healthcare_pipeline/notebooks/01_bronze_ingestion
+  Cluster   : healthcare-pipeline-cluster
+  Click [Create task].
+
+STEP 14.4 - ADD TASK 2: SILVER TRANSFORMATION
+  Click [+ Add task].
+  Task name  : silver_transformation_task
+  Type       : Notebook
+  Path       : Browse to 02_silver_transformation
+  Cluster    : healthcare-pipeline-cluster
+  DEPENDS ON : bronze_ingestion_task
+               (Silver only starts AFTER Bronze succeeds)
+  Click [Create task].
+
+STEP 14.5 - ADD TASK 3: GOLD ANALYTICS
+  Click [+ Add task].
+  Task name  : gold_analytics_task
+  Type       : Notebook
+  Path       : Browse to 03_gold_analytics
+  Cluster    : healthcare-pipeline-cluster
+  DEPENDS ON : silver_transformation_task
+  Click [Create task].
+
+  Task DAG (order of execution):
+    [bronze_ingestion_task] -> [silver_transformation_task] -> [gold_analytics_task]
+
+STEP 14.6 - SET SCHEDULE (Daily at 2 AM UTC)
+  1. Click [Schedules & Triggers] tab on job page.
+  2. Click [Add schedule].
+  3. Trigger type: Scheduled
+  4. Schedule type: Cron
+  5. Cron expression: 0 2 * * *
+     Meaning: At minute 0, hour 2, every day.
+  6. Timezone: UTC
+  7. Click [Save].
+
+  CRON REFERENCE:
+    0 2 * * *    = Daily at 2:00 AM UTC
+    0 */6 * * *  = Every 6 hours
+    0 2 * * 1    = Weekly, Monday at 2 AM
+    0 2 1 * *    = Monthly, 1st day at 2 AM
+
+STEP 14.7 - ADD ALERTS (EMAIL ON FAILURE)
+  In job page, find "Notifications" -> [Add notification].
+  Enter your email. Check: On start, On success, On failure.
+  Click [Save].
+
+STEP 14.8 - TEST WITH MANUAL RUN
+  1. Click [Run now] on job page.
+  2. Click [Runs] tab to watch live progress.
+     Gray = pending, Blue = running, Green = success, Red = failed.
+  3. Click any task box to see its notebook output + logs.
+
+================================================================================
+SECTION 15: TESTING THE PIPELINE
+================================================================================
+
+STEP 15.1 - MANUAL END-TO-END TEST
+  1. Open 01_bronze_ingestion -> [Run all].
+     Expected: "Rows read from Glue catalog: ~56,501" and "Bronze row count: ~56,501"
+
+  2. Open 02_silver_transformation -> [Run all].
+     Expected: All quality checks [PASS]. Gender shows Male/Female/Unknown only.
+
+  3. Open 03_gold_analytics -> [Run all].
+     Expected: 4 Gold tables created. KPI shows realistic percent values.
+
+STEP 15.2 - SQL VALIDATION (SQL Editor in left sidebar)
+
+  -- Row counts across all layers:
+  SELECT 'Bronze'   AS layer, COUNT(*) AS rows FROM healthcare.bronze_patient_records UNION ALL
+  SELECT 'Silver'   AS layer, COUNT(*) AS rows FROM healthcare.silver_patient_records UNION ALL
+  SELECT 'GoldRisk' AS layer, COUNT(*) AS rows FROM healthcare.gold_patient_risk UNION ALL
+  SELECT 'GoldHosp' AS layer, COUNT(*) AS rows FROM healthcare.gold_hospital_statistics UNION ALL
+  SELECT 'GoldDiag' AS layer, COUNT(*) AS rows FROM healthcare.gold_diagnosis_analytics;
+
+  -- Top hospitals by heart disease rate:
+  SELECT hospital_id, total_patients, heart_disease_rate_pct
+  FROM healthcare.gold_hospital_statistics
+  ORDER BY heart_disease_rate_pct DESC LIMIT 5;
+
+  -- Risk distribution:
+  SELECT risk_category, COUNT(*) AS patients
+  FROM healthcare.gold_patient_risk GROUP BY risk_category ORDER BY patients DESC;
+
+  -- Top diagnoses:
+  SELECT diagnosis_description, patient_count, avg_age, heart_disease_pct
+  FROM healthcare.gold_diagnosis_analytics ORDER BY patient_count DESC LIMIT 10;
+
+  -- Pipeline log status:
+  SELECT notebook_name, status, records_processed, duration_seconds
+  FROM healthcare.pipeline_log WHERE status = 'SUCCESS'
+  ORDER BY created_at DESC LIMIT 5;
+
+================================================================================
+SECTION 16: MONITORING
+================================================================================
+
+STEP 16.1 - MONITOR JOB RUNS
+  Workflows -> healthcare_patient_analytics_pipeline -> [Runs] tab.
+  Each row = one pipeline run. Shows: Start time, Duration, Status.
+  Click any run for per-task logs and output.
+
+STEP 16.2 - CLUSTER DRIVER LOGS
+  Compute -> healthcare-pipeline-cluster -> [Driver logs] tab.
+  Click "stderr" or "stdout" to read Spark engine logs.
+  Search for: ERROR, Exception, WARN to find issues.
+
+STEP 16.3 - SPARK UI
+  Inside any running task -> click [Spark UI] link.
+  Tabs: Jobs, Stages, Tasks, SQL.
+  If one stage takes 10x longer (data skew), fix with:
+    df.repartition(col("hospital_id"))
+
+STEP 16.4 - DAILY HEALTH CHECK QUERY
+
+  spark.sql("""
+      SELECT pipeline_run_id, status,
+             SUM(records_processed) AS total_records,
+             MAX(created_at) AS completed_at
+      FROM healthcare.pipeline_log
+      WHERE DATE(created_at) = CURRENT_DATE()
+      GROUP BY pipeline_run_id, status
+      ORDER BY completed_at DESC LIMIT 5
+  """).show(truncate=False)
+
+================================================================================
+SECTION 17: FINAL DEPLOYMENT CHECKLIST
+================================================================================
+
+AWS INFRASTRUCTURE
+  [ ] S3 bucket created and named (remember to replace <YOUR_BUCKET_NAME> everywhere)
+  [ ] Folders created: raw/, bronze/, silver/, gold/
+  [ ] patient_records.csv uploaded to raw/ folder
+  [ ] All public access BLOCKED on bucket
+  [ ] Versioning ENABLED on bucket
+
+IAM
+  [ ] IAM user: databricks-pipeline-user created
+  [ ] Access Key ID and Secret Key saved securely
+  [ ] Policy: DatabricksHealthcarePipelinePolicy attached
+  [ ] Glue IAM Role: AWSGlueServiceRole-healthcare created
+  [ ] Inline policy GlueS3BucketAccess attached to Glue role
+
+AWS GLUE
+  [ ] Glue database created: healthcare_raw
+  [ ] Glue Crawler created: patient-records-crawler
+  [ ] Crawler ran successfully (status: Succeeded)
+  [ ] Glue table created in healthcare_raw database
+  [ ] Table schema shows all 32 columns from patient_records.csv
+
+DATABRICKS
+  [ ] Cluster: healthcare-pipeline-cluster created (Runtime 14.3 LTS)
+  [ ] Maven library installed: aws-glue-datacatalog-client-shaded:3.4.0
+  [ ] Spark config includes Glue metastore factory class and AWS region
+  [ ] S3 access keys in Spark config
+  [ ] Glue connection tested: spark.sql("SHOW TABLES IN healthcare_raw") works
+
+NOTEBOOKS (all S3_BUCKET_NAME updated from "your-s3-bucket-name" to real value)
+  [ ] Folder: Home/healthcare_pipeline/notebooks/ in Workspace
+  [ ] 00_setup_and_config created
+  [ ] 01_bronze_ingestion - reads from Glue catalog, writes Bronze Delta
+  [ ] 02_silver_transformation - cleans, validates, MERGE upserts to Silver
+  [ ] 03_gold_analytics - produces 4 Gold tables
+
+DELTA TABLES
+  [ ] healthcare.bronze_patient_records (partitioned by _ingestion_date)
+  [ ] healthcare.silver_patient_records (partitioned by diagnosis_code)
+  [ ] healthcare.gold_patient_risk (partitioned by risk_category)
+  [ ] healthcare.gold_hospital_statistics (partitioned by hospital_id)
+  [ ] healthcare.gold_diagnosis_analytics
+  [ ] healthcare.gold_daily_kpi
+  [ ] healthcare.pipeline_log
+
+DATA QUALITY (all Silver checks passed)
+  [ ] Gender: Male / Female / Unknown only
+  [ ] Smoking status: Yes / No / Unknown only
+  [ ] Nulls handled on all critical columns
+  [ ] Deduplication by patient_id in Silver
+  [ ] Range validation: age, BP, heart rate, BMI, glucose
+  [ ] All [PASS] in quality check output
+
+DELTA OPTIMIZATIONS
+  [ ] OPTIMIZE run on all tables
+  [ ] ZORDER applied on key query columns
+  [ ] VACUUM run (168-hour retention)
+  [ ] ANALYZE TABLE on Gold tables
+
+ORCHESTRATION
+  [ ] Workflow: healthcare_patient_analytics_pipeline created
+  [ ] 3 tasks in correct order: bronze -> silver -> gold
+  [ ] Cron: 0 2 * * * (daily 2 AM UTC)
+  [ ] Email alerts configured
+
+FINAL VALIDATION SQL
+  -- All tables have data:
+  SHOW TABLES IN healthcare;
+
+  -- Bronze has Glue-ingested data with metadata:
+  SELECT patient_id, gender, age, _ingestion_timestamp, _batch_id
+  FROM healthcare.bronze_patient_records LIMIT 3;
+
+  -- Silver has no bad gender values (count must be 0):
+  SELECT COUNT(*) AS bad_gender
+  FROM healthcare.silver_patient_records
+  WHERE gender NOT IN ('Male','Female','Unknown');
+
+  -- Gold KPI is current:
+  SELECT * FROM healthcare.gold_daily_kpi ORDER BY created_at DESC LIMIT 1;
+
+  -- All pipeline runs logged:
+  SELECT notebook_name, status, records_processed
+  FROM healthcare.pipeline_log WHERE status = 'SUCCESS'
+  ORDER BY created_at DESC LIMIT 5;
+
+================================================================================
+PIPELINE IS PRODUCTION-READY!
+================================================================================
+
+  AWS Glue     - Auto-discovers and catalogs raw CSV from S3
+  AWS S3       - Durable cloud storage for all pipeline data
+  Databricks   - Managed Spark for distributed processing
+  PySpark      - Transformations at scale across all 3 layers
+  Delta Lake   - ACID-compliant table format with time travel
+  Medallion    - Bronze / Silver / Gold data quality architecture
+  Workflows    - Automated daily scheduling and monitoring
+
+  DAILY PIPELINE FLOW (runs at 2 AM UTC):
+    1. Glue Crawler rescans S3 for new data (if triggered before Databricks)
+    2. Bronze: reads Glue catalog -> adds metadata -> writes Delta
+    3. Silver: cleans + validates + MERGE upsert -> quality checks
+    4. Gold  : produces 4 analytics tables for dashboards and ML
+    5. Logging: every step logged to pipeline_log table
+    6. Alert : email sent on success or failure
+
+================================================================================
+END OF GUIDE
+Healthcare Patient Analytics Pipeline | Medallion Architecture | March 2026
+================================================================================
